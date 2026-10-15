@@ -1,0 +1,522 @@
+name: Build Space Invaders APK
+on: [push, workflow_dispatch]
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate and Compile SpaceInvadersTheme.apk
+        run: |
+          set -e
+          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          PLATFORM=$(ls -d $ANDROID_HOME/platforms/android-* | sort -V | tail -n 1)
+          mkdir -p src/com/arcade/invaders res/xml build/gen build/classes
+          cat << 'EOF' > AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.arcade.invaders"
+              android:versionCode="1"
+              android:versionName="1.0">
+              <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+              <uses-feature android:name="android.software.live_wallpaper" android:required="true" />
+              <application
+                  android:label="Space Invaders OS"
+                  android:hardwareAccelerated="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".SpaceInvadersWallpaper"
+                      android:label="Space Invaders 8-Bit Engine"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_WALLPAPER">
+                      <intent-filter>
+                          <action android:name="android.service.wallpaper.WallpaperService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.service.wallpaper"
+                          android:resource="@xml/wallpaper" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          cat << 'EOF' > res/xml/wallpaper.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <wallpaper xmlns:android="http://schemas.android.com/apk/res/android" />
+          EOF
+          cat << 'EOF' > src/com/arcade/invaders/ArcadeRenderer.java
+          package com.arcade.invaders;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.graphics.Typeface;
+          import android.view.MotionEvent;
+          import java.util.Random;
+          public class ArcadeRenderer {
+              private static final int MAX_VOXELS = 600;
+              private static final int MAX_WAVES = 16;
+              private static final int MAX_LASERS = 24;
+              private static final float GRID = 10f;
+              private static final float GRAVITY = 2800f;
+              private static final float DRAG = 0.96f;
+              private static final float BOUNCE = 0.60f;
+              private final float[] vx = new float[MAX_VOXELS];
+              private final float[] vy = new float[MAX_VOXELS];
+              private final float[] px = new float[MAX_VOXELS];
+              private final float[] py = new float[MAX_VOXELS];
+              private final float[] vsize = new float[MAX_VOXELS];
+              private final float[] vage = new float[MAX_VOXELS];
+              private final float[] vmax = new float[MAX_VOXELS];
+              private final float[] vhold = new float[MAX_VOXELS];
+              private final int[] vcol = new int[MAX_VOXELS];
+              private final boolean[] vact = new boolean[MAX_VOXELS];
+              private int vCursor = 0;
+              private final float[] wx = new float[MAX_WAVES];
+              private final float[] wy = new float[MAX_WAVES];
+              private final float[] wr = new float[MAX_WAVES];
+              private final int[] wcol = new int[MAX_WAVES];
+              private final boolean[] wact = new boolean[MAX_WAVES];
+              private int wCursor = 0;
+              private final float[] lx = new float[MAX_LASERS];
+              private final float[] ly = new float[MAX_LASERS];
+              private final float[] ltargetY = new float[MAX_LASERS];
+              private final int[] lcol = new int[MAX_LASERS];
+              private final boolean[] lact = new boolean[MAX_LASERS];
+              private int lCursor = 0;
+              private final float[] starX = new float[60];
+              private final float[] starY = new float[60];
+              private final float[] starSpd = new float[60];
+              private final int[] starCol = new int[60];
+              private boolean starsInit = false;
+              private final boolean[][] fleetAlive = new boolean[4][7];
+              private float fleetOffsetX = 60f;
+              private float fleetDir = 1f;
+              private float animTimer = 0f;
+              private int animFrame = 0;
+              private float cannonX = 540f;
+              private int score = 13370;
+              private final Paint paint = new Paint();
+              private final Paint textPaint = new Paint();
+              private final Random rng = new Random();
+              private static final int[] PALETTE = {
+                  0xFF00FF66, 0xFFFF0055, 0xFF00F0FF, 0xFFFFE600, 0xFFFF5500, 0xFFB400FF
+              };
+              private static final int[][] SPRITES = {
+                  { 0b00100000100, 0b00010001000, 0b00111111100, 0b01101110110,
+                    0b11111111111, 0b10111111101, 0b10100000101, 0b00011011000 },
+                  { 0b00100000100, 0b10010001001, 0b10111111101, 0b11101110111,
+                    0b11111111111, 0b01111111110, 0b00100000100, 0b01000000010 },
+                  { 0b00001110000, 0b00011111000, 0b00111111100, 0b01101110110,
+                    0b01111111110, 0b00010101000, 0b00100000100, 0b00010001000 },
+                  { 0b00011111000, 0b01111111110, 0b11011011011, 0b11111111111,
+                    0b00111011100, 0b00010001000, 0b00000000000, 0b00000000000 }
+              };
+              public ArcadeRenderer() {
+                  paint.setAntiAlias(false);
+                  paint.setStyle(Paint.Style.FILL);
+                  textPaint.setAntiAlias(false);
+                  textPaint.setTypeface(Typeface.MONOSPACE);
+                  textPaint.setFakeBoldText(true);
+                  textPaint.setTextSize(38f);
+                  resetFleet();
+              }
+              private void resetFleet() {
+                  for (int r = 0; r < 4; r++) {
+                      for (int c = 0; c < 7; c++) {
+                          fleetAlive[r][c] = true;
+                      }
+                  }
+              }
+              public void onTouch(MotionEvent e, int width, int height) {
+                  int action = e.getActionMasked();
+                  if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+                      int idx = e.getActionIndex();
+                      float tx = e.getX(idx);
+                      float ty = e.getY(idx);
+                      cannonX = tx;
+                      fireLaser(tx, ty, height);
+                      spawnInvaderExplosion(tx, ty, false);
+                      score += 150;
+                  } else if (action == MotionEvent.ACTION_MOVE) {
+                      for (int i = 0; i < e.getPointerCount(); i++) {
+                          cannonX = e.getX(i);
+                          if (rng.nextFloat() < 0.75f) {
+                              spawnTrail(e.getX(i), e.getY(i));
+                          }
+                      }
+                  }
+              }
+              private void fireLaser(float tx, float ty, int h) {
+                  int i = lCursor;
+                  lCursor = (lCursor + 1) % MAX_LASERS;
+                  lact[i] = true;
+                  lx[i] = tx;
+                  ly[i] = h - 180f;
+                  ltargetY[i] = ty;
+                  lcol[i] = PALETTE[rng.nextInt(PALETTE.length)];
+              }
+              private void spawnInvaderExplosion(float tx, float ty, boolean huge) {
+                  int[] sprite = SPRITES[rng.nextInt(SPRITES.length)];
+                  int col1 = PALETTE[rng.nextInt(PALETTE.length)];
+                  int col2 = PALETTE[rng.nextInt(PALETTE.length)];
+                  float size = huge ? GRID * 1.8f : GRID * 1.4f;
+                  for (int r = 0; r < 8; r++) {
+                      int bits = sprite[r];
+                      for (int c = 0; c < 11; c++) {
+                          if ((bits & (1 << (10 - c))) != 0) {
+                              int idx = vCursor;
+                              vCursor = (vCursor + 1) % MAX_VOXELS;
+                              float ox = (c - 5) * size;
+                              float oy = (r - 4) * size;
+                              float dist = (float) Math.hypot(ox, oy);
+                              if (dist < 1f) dist = 1f;
+                              float spd = rng.nextFloat() * 1100f + 500f;
+                              vact[idx] = true;
+                              px[idx] = tx + ox;
+                              py[idx] = ty + oy;
+                              vx[idx] = (ox / dist) * spd + (rng.nextFloat() - 0.5f) * 450f;
+                              vy[idx] = (oy / dist) * spd - rng.nextFloat() * 550f;
+                              vsize[idx] = size;
+                              vcol[idx] = (r < 4) ? col1 : col2;
+                              vage[idx] = 0f;
+                              vmax[idx] = rng.nextFloat() * 0.55f + 0.35f;
+                              vhold[idx] = 0.042f;
+                          }
+                      }
+                  }
+                  for (int s = 0; s < 30; s++) {
+                      int idx = vCursor;
+                      vCursor = (vCursor + 1) % MAX_VOXELS;
+                      double ang = rng.nextDouble() * Math.PI * 2.0;
+                      float spd = rng.nextFloat() * 1650f + 600f;
+                      vact[idx] = true;
+                      px[idx] = tx;
+                      py[idx] = ty;
+                      vx[idx] = (float) Math.cos(ang) * spd;
+                      vy[idx] = (float) Math.sin(ang) * spd - 300f;
+                      vsize[idx] = rng.nextBoolean() ? GRID * 2f : GRID;
+                      vcol[idx] = PALETTE[rng.nextInt(PALETTE.length)];
+                      vage[idx] = 0f;
+                      vmax[idx] = rng.nextFloat() * 0.5f + 0.25f;
+                      vhold[idx] = 0f;
+                  }
+                  int w = wCursor;
+                  wCursor = (wCursor + 1) % MAX_WAVES;
+                  wact[w] = true;
+                  wx[w] = tx;
+                  wy[w] = ty;
+                  wr[w] = 16f;
+                  wcol[w] = col1;
+              }
+              private void spawnTrail(float tx, float ty) {
+                  for (int s = 0; s < 4; s++) {
+                      int idx = vCursor;
+                      vCursor = (vCursor + 1) % MAX_VOXELS;
+                      vact[idx] = true;
+                      px[idx] = tx + (rng.nextFloat() - 0.5f) * 24f;
+                      py[idx] = ty + (rng.nextFloat() - 0.5f) * 24f;
+                      vx[idx] = (rng.nextFloat() - 0.5f) * 520f;
+                      vy[idx] = (rng.nextFloat() - 0.8f) * 480f;
+                      vsize[idx] = GRID * 1.2f;
+                      vcol[idx] = PALETTE[rng.nextInt(PALETTE.length)];
+                      vage[idx] = 0f;
+                      vmax[idx] = 0.30f;
+                      vhold[idx] = 0f;
+                  }
+              }
+              private float snap(float v) {
+                  return ((int) (v / GRID)) * GRID;
+              }
+              public void updateAndDraw(Canvas canvas, float dt) {
+                  int w = canvas.getWidth();
+                  int h = canvas.getHeight();
+                  if (w <= 0 || h <= 0) return;
+                  if (!starsInit) {
+                      for (int i = 0; i < starX.length; i++) {
+                          starX[i] = rng.nextFloat() * w;
+                          starY[i] = rng.nextFloat() * h;
+                          starSpd[i] = rng.nextFloat() * 60f + 20f;
+                          starCol[i] = PALETTE[rng.nextInt(PALETTE.length)];
+                      }
+                      cannonX = w / 2f;
+                      starsInit = true;
+                  }
+                  canvas.drawColor(0xFF000000);
+                  for (int i = 0; i < starX.length; i++) {
+                      starY[i] += starSpd[i] * dt;
+                      if (starY[i] > h) {
+                          starY[i] = 0f;
+                          starX[i] = rng.nextFloat() * w;
+                      }
+                      paint.setColor(starCol[i]);
+                      paint.setAlpha(75);
+                      canvas.drawRect(snap(starX[i]), snap(starY[i]), snap(starX[i]) + 6f, snap(starY[i]) + 6f, paint);
+                  }
+                  textPaint.setColor(0xFF00FF66);
+                  canvas.drawText("SCORE<" + score + ">", 48f, 130f, textPaint);
+                  textPaint.setColor(0xFFFF0055);
+                  canvas.drawText("HI-SCORE<99990>", w - 420f, 130f, textPaint);
+                  animTimer += dt;
+                  if (animTimer > 0.45f) {
+                      animTimer = 0f;
+                      animFrame = 1 - animFrame;
+                  }
+                  fleetOffsetX += fleetDir * 75f * dt;
+                  float spacingX = (w - 160f) / 7f;
+                  if (fleetOffsetX > 110f) fleetDir = -1f;
+                  if (fleetOffsetX < 30f) fleetDir = 1f;
+                  boolean anyAlive = false;
+                  int[] rowColors = { 0xFFFF0055, 0xFF00F0FF, 0xFFFFE600, 0xFF00FF66 };
+                  for (int r = 0; r < 4; r++) {
+                      int[] sprite = (r == 0) ? SPRITES[2] : SPRITES[animFrame];
+                      float iy = 200f + r * 82f;
+                      for (int c = 0; c < 7; c++) {
+                          if (!fleetAlive[r][c]) continue;
+                          anyAlive = true;
+                          float ix = fleetOffsetX + c * spacingX;
+                          drawSprite(canvas, sprite, ix, iy, 6f, rowColors[r]);
+                      }
+                  }
+                  if (!anyAlive) resetFleet();
+                  paint.setColor(0xFF00FF66);
+                  paint.setAlpha(180);
+                  canvas.drawRect(0, h - 140f, w, h - 134f, paint);
+                  drawSprite(canvas, SPRITES[3], cannonX - 33f, h - 190f, 6f, 0xFF00FF66);
+                  for (int i = 0; i < MAX_LASERS; i++) {
+                      if (!lact[i]) continue;
+                      paint.setColor(0xFFFFFFFF);
+                      canvas.drawRect(snap(lx[i]) - 4f, ltargetY[i], snap(lx[i]) + 4f, ly[i], paint);
+                      paint.setColor(lcol[i]);
+                      paint.setAlpha(180);
+                      canvas.drawRect(snap(lx[i]) - 10f, ltargetY[i], snap(lx[i]) + 10f, ly[i], paint);
+                      for (int r = 0; r < 4; r++) {
+                          float iy = 200f + r * 82f;
+                          for (int c = 0; c < 7; c++) {
+                              if (fleetAlive[r][c]) {
+                                  float ix = fleetOffsetX + c * spacingX;
+                                  if (Math.abs(lx[i] - (ix + 30f)) < 55f && ltargetY[i] <= iy + 60f) {
+                                      fleetAlive[r][c] = false;
+                                      score += 500;
+                                      spawnInvaderExplosion(ix + 30f, iy + 24f, true);
+                                  }
+                              }
+                          }
+                      }
+                      lact[i] = false;
+                  }
+                  for (int i = 0; i < MAX_WAVES; i++) {
+                      if (!wact[i]) continue;
+                      wr[i] += 1100f * dt;
+                      if (wr[i] >= 240f) {
+                          wact[i] = false;
+                          continue;
+                      }
+                      paint.setColor(wcol[i]);
+                      paint.setAlpha((int) ((1f - wr[i] / 240f) * 255));
+                      for (int s = 0; s < 16; s++) {
+                          double a = (s / 16.0) * Math.PI * 2.0;
+                          float rx = snap(wx[i] + (float) Math.cos(a) * wr[i]);
+                          float ry = snap(wy[i] + (float) Math.sin(a) * wr[i]);
+                          canvas.drawRect(rx, ry, rx + GRID, ry + GRID, paint);
+                      }
+                  }
+                  for (int i = 0; i < MAX_VOXELS; i++) {
+                      if (!vact[i]) continue;
+                      if (vhold[i] > 0f) {
+                          vhold[i] -= dt;
+                          paint.setColor(0xFFFFFFFF);
+                          paint.setAlpha(255);
+                          float sx = snap(px[i]);
+                          float sy = snap(py[i]);
+                          canvas.drawRect(sx, sy, sx + vsize[i], sy + vsize[i], paint);
+                          continue;
+                      }
+                      vage[i] += dt;
+                      if (vage[i] >= vmax[i]) {
+                          vact[i] = false;
+                          continue;
+                      }
+                      vx[i] *= DRAG;
+                      vy[i] = vy[i] * DRAG + GRAVITY * dt;
+                      px[i] += vx[i] * dt;
+                      py[i] += vy[i] * dt;
+                      if (px[i] < 0f || px[i] + vsize[i] > w) {
+                          vx[i] = -vx[i] * BOUNCE;
+                          px[i] = Math.max(0f, Math.min(w - vsize[i], px[i]));
+                      }
+                      if (py[i] + vsize[i] > h - 140f) {
+                          vy[i] = -vy[i] * BOUNCE;
+                          py[i] = h - 140f - vsize[i];
+                      }
+                      float life = vage[i] / vmax[i];
+                      paint.setColor(life < 0.12f ? 0xFFFFFFFF : vcol[i]);
+                      int quantAlpha = (((int) ((1f - life) * 255)) / 64) * 64;
+                      paint.setAlpha(Math.max(64, quantAlpha));
+                      float sx = snap(px[i]);
+                      float sy = snap(py[i]);
+                      canvas.drawRect(sx, sy, sx + vsize[i], sy + vsize[i], paint);
+                  }
+              }
+              private void drawSprite(Canvas c, int[] sprite, float x, float y, float pSize, int color) {
+                  paint.setColor(color);
+                  paint.setAlpha(255);
+                  for (int r = 0; r < 8; r++) {
+                      int bits = sprite[r];
+                      for (int col = 0; col < 11; col++) {
+                          if ((bits & (1 << (10 - col))) != 0) {
+                              float rx = x + col * pSize;
+                              float ry = y + r * pSize;
+                              c.drawRect(rx, ry, rx + pSize, ry + pSize, paint);
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+          cat << 'EOF' > src/com/arcade/invaders/SpaceInvadersWallpaper.java
+          package com.arcade.invaders;
+          import android.graphics.Canvas;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.service.wallpaper.WallpaperService;
+          import android.view.MotionEvent;
+          import android.view.SurfaceHolder;
+          public class SpaceInvadersWallpaper extends WallpaperService {
+              @Override
+              public Engine onCreateEngine() {
+                  return new ArcadeEngine();
+              }
+              private class ArcadeEngine extends Engine {
+                  private final ArcadeRenderer renderer = new ArcadeRenderer();
+                  private final Handler handler = new Handler(Looper.getMainLooper());
+                  private boolean visible = false;
+                  private long lastNanos = System.nanoTime();
+                  private final Runnable drawRunner = new Runnable() {
+                      @Override
+                      public void run() {
+                          drawFrame();
+                      }
+                  };
+                  public ArcadeEngine() {
+                      setTouchEventsEnabled(true);
+                  }
+                  @Override
+                  public void onVisibilityChanged(boolean v) {
+                      visible = v;
+                      if (visible) {
+                          lastNanos = System.nanoTime();
+                          handler.post(drawRunner);
+                      } else {
+                          handler.removeCallbacks(drawRunner);
+                      }
+                  }
+                  @Override
+                  public void onTouchEvent(MotionEvent event) {
+                      SurfaceHolder holder = getSurfaceHolder();
+                      if (holder != null && holder.getSurfaceFrame() != null) {
+                          renderer.onTouch(event, holder.getSurfaceFrame().width(), holder.getSurfaceFrame().height());
+                      }
+                      super.onTouchEvent(event);
+                  }
+                  private void drawFrame() {
+                      SurfaceHolder holder = getSurfaceHolder();
+                      Canvas canvas = null;
+                      long now = System.nanoTime();
+                      float dt = Math.min((now - lastNanos) / 1_000_000_000f, 0.033f);
+                      lastNanos = now;
+                      try {
+                          canvas = holder.lockCanvas();
+                          if (canvas != null) {
+                              renderer.updateAndDraw(canvas, dt);
+                          }
+                      } finally {
+                          if (canvas != null) {
+                              holder.unlockCanvasAndPost(canvas);
+                          }
+                      }
+                      handler.removeCallbacks(drawRunner);
+                      if (visible) {
+                          handler.postDelayed(drawRunner, 8);
+                      }
+                  }
+              }
+          }
+          EOF
+          cat << 'EOF' > src/com/arcade/invaders/MainActivity.java
+          package com.arcade.invaders;
+          import android.app.Activity;
+          import android.app.WallpaperManager;
+          import android.content.ComponentName;
+          import android.content.Intent;
+          import android.graphics.Canvas;
+          import android.graphics.Typeface;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.FrameLayout;
+          public class MainActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  FrameLayout root = new FrameLayout(this);
+                  View arcadeView = new View(this) {
+                      private final ArcadeRenderer renderer = new ArcadeRenderer();
+                      private long lastNanos = System.nanoTime();
+                      @Override
+                      protected void onDraw(Canvas canvas) {
+                          long now = System.nanoTime();
+                          float dt = Math.min((now - lastNanos) / 1_000_000_000f, 0.033f);
+                          lastNanos = now;
+                          renderer.updateAndDraw(canvas, dt);
+                          postInvalidateOnAnimation();
+                      }
+                      @Override
+                      public boolean onTouchEvent(MotionEvent event) {
+                          renderer.onTouch(event, getWidth(), getHeight());
+                          return true;
+                      }
+                  };
+                  Button applyBtn = new Button(this);
+                  applyBtn.setText("[ ACTIVATE SPACE INVADERS THEME ]");
+                  applyBtn.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                  applyBtn.setTextColor(0xFF000000);
+                  applyBtn.setBackgroundColor(0xFF00FF66);
+                  applyBtn.setPadding(40, 36, 40, 36);
+                  applyBtn.setOnClickListener(v -> {
+                      Intent intent = new Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER);
+                      intent.putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,
+                          new ComponentName(MainActivity.this, SpaceInvadersWallpaper.class));
+                      startActivity(intent);
+                  });
+                  FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                      FrameLayout.LayoutParams.WRAP_CONTENT,
+                      FrameLayout.LayoutParams.WRAP_CONTENT,
+                      Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
+                  );
+                  params.bottomMargin = 160;
+                  root.addView(arcadeView);
+                  root.addView(applyBtn, params);
+                  setContentView(root);
+              }
+          }
+          EOF
+          $BUILD_TOOLS/aapt2 compile --dir res -o build/res.zip
+          $BUILD_TOOLS/aapt2 link -o build/unaligned.apk -I $PLATFORM/android.jar --manifest AndroidManifest.xml --java build/gen build/res.zip
+          javac -source 11 -target 11 -cp $PLATFORM/android.jar -d build/classes src/com/arcade/invaders/*.java build/gen/com/arcade/invaders/R.java
+          $BUILD_TOOLS/d8 --lib $PLATFORM/android.jar --output build/ build/classes/com/arcade/invaders/*.class
+          zip -j build/unaligned.apk build/classes.dex
+          $BUILD_TOOLS/zipalign -f -p 4 build/unaligned.apk SpaceInvadersTheme.apk
+          keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          $BUILD_TOOLS/apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android SpaceInvadersTheme.apk
+      - name: Upload Compiled APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpaceInvadersTheme-APK
+          path: SpaceInvadersTheme.apk
